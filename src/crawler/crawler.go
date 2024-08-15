@@ -143,7 +143,9 @@ func filteredLinks(links []string) []string {
 func (c *Crawler) ProcessResponse(resp *http.Response) ([]string, error) {
 	defer resp.Body.Close()
 	url := resp.Request.RequestURI
-	//url := resp.Request.Response.Request.URL.String()
+	if len(url) == 0 {
+		url = resp.Request.Response.Request.URL.String()
+	}
 	var found []string
 
 	contentType := resp.Header.Get("Content-Type")
