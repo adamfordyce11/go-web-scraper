@@ -49,12 +49,12 @@ func (f *Fetcher) NewRequest(url string) {
 // Create a worker pool ready to start fetching URLs when the
 // fetcher.Requests channel is updated
 func (f *Fetcher) StartFetching(wg *sync.WaitGroup) {
-	defer wg.Done()
+	//defer wg.Done()
 	for i := 0; i < f.Workers; i++ {
 		wg.Add(1)
 		go f.worker(wg)
 	}
-	wg.Wait()
+	//wg.Wait()
 }
 
 // worker - private method that will perform the http.Get requests
@@ -71,6 +71,7 @@ func (f *Fetcher) worker(wg *sync.WaitGroup) {
 				return
 			}
 
+			//f.Err <- fmt.Errorf("fatcher: requesting data for %s", url)
 			var resp *http.Response
 			var err error
 
@@ -80,7 +81,7 @@ func (f *Fetcher) worker(wg *sync.WaitGroup) {
 
 				resp, err = http.Get(url)
 				if err != nil {
-					f.Err <- fmt.Errorf("Failed to fetch: %v", err)
+					f.Err <- fmt.Errorf("failed to fetch: %v", err)
 					if retries < f.RetryCount {
 						time.Sleep(1 * time.Second)
 						continue
@@ -89,7 +90,7 @@ func (f *Fetcher) worker(wg *sync.WaitGroup) {
 				}
 
 				if ctx.Err() == context.DeadlineExceeded {
-					f.Err <- fmt.Errorf("Timed out fetching %s after %d retries", url, retries)
+					f.Err <- fmt.Errorf("timed out fetching %s after %d retries", url, retries)
 					if retries < f.RetryCount {
 						time.Sleep(1 * time.Second)
 						continue

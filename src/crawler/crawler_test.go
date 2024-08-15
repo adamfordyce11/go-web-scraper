@@ -110,7 +110,6 @@ func Test_startFindLinks(t *testing.T) {
 	if len(links) != 7 {
 		t.Errorf("Failed to get all links in sample html from %s: %d", ts.URL, len(links))
 	}
-
 }
 
 func Test_ProcessResponse(t *testing.T) {

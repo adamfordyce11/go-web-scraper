@@ -11,10 +11,11 @@ import (
 	"flag"
 	"fmt"
 	"linkcrawl/crawler"
-	"linkcrawl/data"
 	"linkcrawl/fetcher"
+	"linkcrawl/fronter"
 	"net/http"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -26,136 +27,14 @@ func stream(output <-chan string, errors <-chan error, done <-chan struct{}, wg 
 	for {
 		select {
 		case msg := <-output:
-			fmt.Printf("data,%v\n", msg)
+			if 1 > 0 {
+				fmt.Printf("data,%v\n", msg)
+			}
 		case err := <-errors:
 			fmt.Printf("error,%v\n", err)
 		case <-done:
 			return
 		}
-	}
-}
-
-// Take the supplied URL as the `seed` and enqueue it into the worklist
-// channel for processing.
-func seed(domain *string, worklist chan<- []string, wg *sync.WaitGroup) {
-	defer wg.Done()
-	worklist <- []string{*domain}
-}
-
-func worker(c *crawler.Crawler, unseenUrls <-chan string, worklist chan<- []string, fetcher *fetcher.Fetcher, done chan struct{}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for {
-		select {
-		case link, ok := <-unseenUrls:
-			if !ok {
-				return
-			}
-
-			fetcher.NewRequest(link)
-
-			select {
-			case resp := <-fetcher.Fetch:
-				foundLinks, err := c.ProcessResponse(resp)
-				if err != nil {
-					fetcher.Err <- err
-				} else {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						worklist <- foundLinks
-					}()
-				}
-			case <-done:
-				return
-			}
-		case <-done:
-			return
-		}
-	}
-}
-
-// Retrieve the data that is returned from the crawler.Crawl method and
-// process the links that are returned storing them and their visited state
-// in a thread safe data.Data.Links structure.
-// Unseen URLs are written to the unseenUrls channel
-func cache(visited *data.Data, unseenUrls chan<- string, worklist <-chan []string, done <-chan struct{}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for {
-		select {
-		case list, ok := <-worklist:
-			if !ok {
-				return
-			}
-			for _, link := range list {
-				visited.Mu.Lock()
-				if !visited.Links[link] {
-					visited.Links[link] = true
-					unseenUrls <- link
-				}
-				visited.Mu.Unlock()
-			}
-		case <-done:
-			return
-		}
-	}
-}
-
-// Monitor for completion
-// The number of URLs (keys) in the data.Links map indicate the number of
-// URLs that have been found. Using this structure along with checking the
-// size of the worker queue gives indication when the program can exit
-// Three chances are given with a pregnant pause in between to make sure that
-// the crawling really is finished and that no more data will be written to
-// to the channels once they are closed.
-func monitor(visited *data.Data, unseenUrls chan string, worklist chan []string, done chan struct{}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	chances := 0
-	lastSeen := 0
-	lastVisited := 0
-	for {
-		time.Sleep(1 * time.Second)
-		var seen []string
-
-		// Lock data structure from further R/W before processing its contents
-		visited.Mu.Lock()
-
-		// Store the URLs that have been crawled
-		for url, been := range visited.Links {
-			if been {
-				seen = append(seen, url)
-			}
-		}
-
-		// Reset the chances counter if the crawling starts again
-		if len(seen) != len(visited.Links) {
-			chances = 0
-		}
-
-		if len(seen) == len(visited.Links) && len(seen) == lastSeen && len(visited.Links) == lastVisited && len(visited.Links) > 0 {
-			chances++
-			time.Sleep(3 * time.Second)
-		}
-
-		// Unlock the data structure
-		visited.Mu.Unlock()
-
-		// The conditions to exit the program have been met, stop all running
-		// goroutines and exit
-		if chances == 3 {
-			close(done)
-			close(worklist)
-			close(unseenUrls)
-			return
-		}
-
-		// Update the last seen and last visited variables use in the next loop
-		// iteration
-		lastSeen = len(seen)
-		lastVisited = len(visited.Links)
-
-		// Reset the seen list so that on the next loop iteration it is filled
-		// with a fresh list of URLs that have now been scraped
-		seen = seen[:0]
 	}
 }
 
@@ -180,19 +59,6 @@ func monitor(visited *data.Data, unseenUrls chan string, worklist chan []string,
 // References: The Go Programming Language: Section 8.6
 // ISBN-10: 0-13-419044-0
 func main() {
-
-	/*
-		// Debugging
-		go func() {
-			timer := time.NewTicker(1 * time.Second)
-			for {
-				select {
-				case <-timer.C:
-					fmt.Printf("process,%d goroutines\n", runtime.NumGoroutine())
-				}
-			}
-		}()
-	*/
 	domain := flag.String("domain", "", "The domain to crawl")
 	flag.Parse()
 
@@ -201,37 +67,44 @@ func main() {
 		os.Exit(1)
 	}
 
-	var wg sync.WaitGroup
-	visited := data.NewData()
-	worklist := make(chan []string) // Data returned from crawling
-	unseenUrls := make(chan string) // URLs to scrape
-	done := make(chan struct{})     // Signal go routines to exit
-	output := make(chan string)     // Channel to send output to
-	errors := make(chan error)      // Channel to send errors to
+	var wgStream sync.WaitGroup
+	var wgFetch sync.WaitGroup
+	var wgFront sync.WaitGroup
+	done := make(chan struct{}) // Signal go routines to exit
+	output := make(chan string) // Channel to send output to
+	errors := make(chan error)  // Channel to send errors to
 	fetch := make(chan *http.Response)
 
 	// Initialise a new web crawler from the crawler package.
-	c := crawler.NewCrawler(*domain, output, errors, fetch)
+	crawler := crawler.NewCrawler(*domain, output, errors, fetch)
+	fetcher := fetcher.NewFetcher(10, 3, 5*time.Second, output, errors, fetch, done)
+	fronter := fronter.NewFronter(20, 3, 5*time.Second, fetcher, crawler, output, errors, done)
 
-	fetcher := fetcher.NewFetcher(5, 3, 5*time.Second, output, errors, fetch, done)
+	wgStream.Add(1)
+	go stream(output, errors, done, &wgStream)
+	fetcher.StartFetching(&wgFetch)
+	fronter.StartFronting(&wgFront)
+	fronter.Seed(*domain)
 
-	wg.Add(1)
-	go fetcher.StartFetching(&wg)
+	timer := time.NewTicker(1 * time.Second)
+	//locked := false
+	for {
+		select {
+		case <-timer.C:
+			fmt.Printf("process,%d goroutines\n", runtime.NumGoroutine())
 
-	// Spawn the goroutines to form the worker pool.
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go worker(c, unseenUrls, worklist, fetcher, done, &wg)
+		case <-done:
+			wgStream.Wait() // Wait for the processing to complete
+			fmt.Printf("process,wgStream done - %d goroutines\n", runtime.NumGoroutine())
+			wgFetch.Wait() // Wait for the processing to complete
+			fmt.Printf("process,wgFetch done - %d goroutines\n", runtime.NumGoroutine())
+			wgFront.Wait() // Wait for the processing to complete
+			fmt.Printf("process,wgFront done - %d goroutines\n", runtime.NumGoroutine())
+			close(fetch)
+			close(errors)
+			close(output)
+			return
+		}
 	}
 
-	wg.Add(4)
-	go stream(output, errors, done, &wg)
-	go seed(domain, worklist, &wg)
-	go cache(visited, unseenUrls, worklist, done, &wg)
-	go monitor(visited, unseenUrls, worklist, done, &wg)
-
-	wg.Wait() // Wait for the processing to complete
-	close(fetch)
-	close(errors)
-	close(output)
 }
